@@ -1,0 +1,159 @@
+name: Build Pisces kernel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH: arm
+  SUBARCH: arm
+  OUT_DIR: out
+  DEFCONFIG: tegra11_pisces_user_defconfig
+  TOOLCHAIN_ARCHIVE_URL: https://github.com/Deep-sea-lab/kernel_cancro_kernelsu/releases/download/gcc4.9.4/gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabi.tar.xz
+  TOOLCHAIN_ARCHIVE_SHA256: 232302236c90ec136a42d44bc387d2e1199f5df010b77e97ee590216d2b5b181
+  ANYKERNEL3_REPOSITORY: https://github.com/osm0sis/AnyKernel3.git
+  ANYKERNEL3_REF: af770f7b16cf8f8eb7c68614b2a693b3b361c90c
+
+jobs:
+  build:
+    name: Build tegra11_pisces_user_defconfig
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            curl \
+            flex \
+            git \
+            unzip \
+            xz-utils \
+            zip
+
+      - name: Download Linaro GCC 4.9.4
+        run: |
+          TOOLCHAIN_DIR="$RUNNER_TEMP/pisces-toolchain"
+          TOOLCHAIN_ARCHIVE="$RUNNER_TEMP/gcc-linaro-4.9.4.tar.xz"
+
+          mkdir -p "$TOOLCHAIN_DIR"
+          curl -L --fail --retry 3 --connect-timeout 30 --max-time 300 \
+            "$TOOLCHAIN_ARCHIVE_URL" \
+            -o "$TOOLCHAIN_ARCHIVE"
+          echo "$TOOLCHAIN_ARCHIVE_SHA256  $TOOLCHAIN_ARCHIVE" | sha256sum -c -
+          tar -xJf "$TOOLCHAIN_ARCHIVE" -C "$TOOLCHAIN_DIR"
+
+          TOOLCHAIN_PREFIX="$TOOLCHAIN_DIR/gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabi/bin/arm-linux-gnueabi-"
+          test -x "${TOOLCHAIN_PREFIX}gcc"
+          "${TOOLCHAIN_PREFIX}gcc" --version
+          echo "TOOLCHAIN_PREFIX=$TOOLCHAIN_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Configure kernel
+        run: |
+          mkdir -p "$OUT_DIR"
+          make \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            SUBARCH="$SUBARCH" \
+            CROSS_COMPILE="$TOOLCHAIN_PREFIX" \
+            HOSTCFLAGS="-fcommon" \
+            "$DEFCONFIG"
+          make -s \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            SUBARCH="$SUBARCH" \
+            CROSS_COMPILE="$TOOLCHAIN_PREFIX" \
+            HOSTCFLAGS="-fcommon" \
+            kernelrelease
+
+      - name: Build kernel
+        run: |
+          make -j"$(nproc)" \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            SUBARCH="$SUBARCH" \
+            CROSS_COMPILE="$TOOLCHAIN_PREFIX" \
+            HOSTCFLAGS="-fcommon"
+
+      - name: Package AnyKernel3 flashable zip
+        run: |
+          IMAGE_PATH="$OUT_DIR/arch/arm/boot/zImage"
+          test -s "$IMAGE_PATH"
+
+          KERNEL_RELEASE="$(make -s \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            SUBARCH="$SUBARCH" \
+            CROSS_COMPILE="$TOOLCHAIN_PREFIX" \
+            HOSTCFLAGS="-fcommon" \
+            kernelrelease)"
+          ZIP_NAME="AnyKernel3-pisces-${KERNEL_RELEASE}-${GITHUB_RUN_NUMBER}.zip"
+          ZIP_PATH="$GITHUB_WORKSPACE/$ZIP_NAME"
+          ANYKERNEL_DIR="$RUNNER_TEMP/AnyKernel3"
+
+          git init -q "$ANYKERNEL_DIR"
+          git -C "$ANYKERNEL_DIR" remote add origin "$ANYKERNEL3_REPOSITORY"
+          git -C "$ANYKERNEL_DIR" fetch -q --depth=1 origin "$ANYKERNEL3_REF"
+          git -C "$ANYKERNEL_DIR" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$ANYKERNEL_DIR" rev-parse HEAD)" = "$ANYKERNEL3_REF"
+
+          cp "$IMAGE_PATH" "$ANYKERNEL_DIR/zImage"
+          cat > "$ANYKERNEL_DIR/anykernel.sh" <<'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          properties() { '
+          kernel.string=Xiaomi Mi 3 TD Pisces Kernel
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=pisces
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          BLOCK=boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=0;
+
+          . tools/ak3-core.sh;
+
+          split_boot;
+          flash_boot;
+          EOF
+          chmod 755 "$ANYKERNEL_DIR/anykernel.sh"
+
+          (
+            cd "$ANYKERNEL_DIR"
+            zip -r9 "$ZIP_PATH" * -x '.git*' 'README.md' '*placeholder'
+          )
+
+          test -s "$ZIP_PATH"
+          unzip -t "$ZIP_PATH"
+          unzip -Z1 "$ZIP_PATH" | grep -qx 'zImage'
+          unzip -Z1 "$ZIP_PATH" | grep -qx 'anykernel.sh'
+          unzip -Z1 "$ZIP_PATH" | grep -qx 'META-INF/com/google/android/update-binary'
+          unzip -Z1 "$ZIP_PATH" | grep -qx 'LICENSE'
+          sha256sum "$ZIP_PATH"
+          echo "ANYKERNEL_ZIP=$ZIP_PATH" >> "$GITHUB_ENV"
+
+      - name: Upload AnyKernel3 flashable zip
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.ANYKERNEL_ZIP }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
