@@ -1,0 +1,247 @@
+diff --git a/kernel/downstream/kallsyms_common.h b/kernel/downstream/kallsyms_common.h
+index 49eee9f..4a3117b 100644
+--- a/kernel/downstream/kallsyms_common.h
++++ b/kernel/downstream/kallsyms_common.h
+@@ -382,8 +382,8 @@ found:
+ // ksu_get_ksym_size, return symbol size, return retfail if fail.
+ static noinline size_t ksu_get_ksym_size(uintptr_t symbol_addr, ptrdiff_t retfail)
+ {
+-	size_t offset = 0;
+-	size_t symbolsize = 0;
++	unsigned long offset = 0;
++	unsigned long symbolsize = 0;
+ 
+ 	kallsyms_lookup_size_offset(symbol_addr, &symbolsize, &offset);
+ 
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index a3e205a..e291ff3 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -228,7 +228,7 @@ static __always_inline void ksu_sucompat_user_common(const char __user **filenam
+ 		goto no_escalate;
+ 
+ #ifdef CONFIG_KSU_FEATURE_SULOG
+-	ksu_sulog_emit(KSU_SULOG_EVENT_SUCOMPAT, NULL, NULL, GFP_KERNEL);
++	ksu_sulog_emit(KSU_SULOG_EVENT_SUCOMPAT, NULL, 0, GFP_KERNEL);
+ #endif
+ 	if (!!escape_with_root_profile())
+ 		return;
+@@ -336,7 +336,7 @@ static __always_inline void ksu_sucompat_kernel_common(int *restrict fd, void **
+ 	write_sulog('x');
+ 
+ #ifdef CONFIG_KSU_FEATURE_SULOG
+-	ksu_sulog_emit(KSU_SULOG_EVENT_SUCOMPAT, NULL, NULL, GFP_KERNEL);
++	ksu_sulog_emit(KSU_SULOG_EVENT_SUCOMPAT, NULL, 0, GFP_KERNEL);
+ #endif
+ 	if (!!escape_with_root_profile())
+ 		return;
+diff --git a/kernel/kernel_includes.h b/kernel/kernel_includes.h
+index f29bfc0..d5d3069 100644
+--- a/kernel/kernel_includes.h
++++ b/kernel/kernel_includes.h
+@@ -282,6 +282,9 @@ static inline void kfree_byref(void *buf) { kfree(*(void **)buf); }
+  */
+ #if !defined(CONFIG_KSU_DEBUG)
+ 
++#ifdef memset
++#undef memset
++#endif
+ #define memchr		__builtin_memchr
+ #define memcmp		__builtin_memcmp
+ #define memcpy		__builtin_memcpy
+diff --git a/kernel/selinux/sepolicy.c b/kernel/selinux/sepolicy.c
+index ddad2aa..fd93193 100644
+--- a/kernel/selinux/sepolicy.c
++++ b/kernel/selinux/sepolicy.c
+@@ -1,5 +1,16 @@
+ #define KSU_SUPPORT_ADD_TYPE
+ 
++#if defined(AVTAB_OP) && !defined(AVTAB_XPERMS)
++#define KSU_SELINUX_LEGACY_IOCTL_OPERATIONS
++#define POLICYDB_VERSION_XPERMS_IOCTL POLICYDB_VERSION_IOCTL_OPERATIONS
++#define AVTAB_XPERMS_ALLOWED AVTAB_OPNUM_ALLOWED
++#define AVTAB_XPERMS_AUDITALLOW AVTAB_OPNUM_AUDITALLOW
++#define AVTAB_XPERMS_DONTAUDIT AVTAB_OPNUM_DONTAUDIT
++#define ksu_avtab_extended_perms avtab_operation
++#else
++#define ksu_avtab_extended_perms avtab_extended_perms
++#endif
++
+ /*
+  * Adapt to Huawei HISI kernel without affecting other kernels ,
+  * Huawei Hisi Kernel EBITMAP Enable or Disable Flag ,
+@@ -19,7 +30,7 @@
+ //////////////////////////////////////////////////////
+ 
+ static struct avtab_node *get_avtab_node(struct policydb *db, struct avtab_key *key,
+-                                         struct avtab_extended_perms *xperms);
++                                         struct ksu_avtab_extended_perms *xperms);
+ 
+ static bool is_redundant_avtab_node(struct avtab_node *node);
+ 
+@@ -83,10 +94,30 @@ static bool add_typeattribute(struct policydb *db, const char *type, const char
+ 
+ static struct avtab_node *get_avtab_node(struct policydb *db,
+ 					 struct avtab_key *key,
+-					 struct avtab_extended_perms *xperms)
++					 struct ksu_avtab_extended_perms *xperms)
+ {
+ 	struct avtab_node *node;
+ 
++#ifdef KSU_SELINUX_LEGACY_IOCTL_OPERATIONS
++	/* Android's original policy v30 ioctl representation. */
++	if (key->specified & AVTAB_OP) {
++		bool match = false;
++		node = avtab_search_node(&db->te_avtab, key);
++		while (node) {
++			if (node->datum.u.ops &&
++			    (!(key->specified & AVTAB_OPNUM) ||
++			     node->datum.u.ops->type == xperms->type)) {
++				match = true;
++				break;
++			}
++			node = avtab_search_node_next(node, key->specified);
++		}
++		if (!match)
++			node = NULL;
++	} else {
++		node = avtab_search_node(&db->te_avtab, key);
++	}
++#else
+ 	/* AVTAB_XPERMS entries are not necessarily unique */
+ 	if (key->specified & AVTAB_XPERMS) {
+ 		bool match = false;
+@@ -105,6 +136,7 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
+ 	} else {
+ 		node = avtab_search_node(&db->te_avtab, key);
+ 	}
++#endif
+ 
+ 	if (!node) {
+ 		struct avtab_datum avdatum = {};
+@@ -112,8 +144,13 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
+      * AUDITDENY, aka DONTAUDIT, are &= assigned, versus |= for
+      * others. Initialize the data accordingly.
+      */
++		#ifdef KSU_SELINUX_LEGACY_IOCTL_OPERATIONS
++		if (key->specified & AVTAB_OP) {
++			avdatum.u.ops = xperms;
++		#else
+ 		if (key->specified & AVTAB_XPERMS) {
+ 			avdatum.u.xperms = xperms;
++		#endif
+ 		} else {
+ 			avdatum.u.data =
+ 				key->specified == AVTAB_AUDITDENY ? ~0U : 0U;
+@@ -125,11 +162,18 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
+ 
+ 		int grow_size = sizeof(struct avtab_key);
+ 		grow_size += sizeof(struct avtab_datum);
++		#ifdef KSU_SELINUX_LEGACY_IOCTL_OPERATIONS
++		if (key->specified & AVTAB_OP) {
++			grow_size += sizeof(u8);
++			grow_size += sizeof(u32) *
++				     ARRAY_SIZE(avdatum.u.ops->op.perms);
++		#else
+ 		if (key->specified & AVTAB_XPERMS) {
+ 			grow_size += sizeof(u8);
+ 			grow_size += sizeof(u8);
+ 			grow_size += sizeof(u32) *
+ 				     ARRAY_SIZE(avdatum.u.xperms->perms.p);
++		#endif
+ 		}
+ 		db->len += grow_size;
+ 	}
+@@ -139,8 +183,13 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
+ 
+ static bool is_redundant_avtab_node(struct avtab_node *node)
+ {
++#ifdef KSU_SELINUX_LEGACY_IOCTL_OPERATIONS
++	if (node->key.specified & AVTAB_OP)
++		return node->datum.u.ops == NULL;
++#else
+ 	if (node->key.specified & AVTAB_XPERMS)
+ 		return node->datum.u.xperms == NULL;
++#endif
+ 	if (!(node->key.specified & AVTAB_AV))
+ 		return false;
+ 	if (node->key.specified & AVTAB_AUDITDENY)
+@@ -205,9 +254,16 @@ static bool remove_avtab_node(struct policydb *db, struct avtab_node *node)
+ 			if (db->te_avtab.nel > 0)
+ 				db->te_avtab.nel--;
+ 
++			#ifdef KSU_SELINUX_LEGACY_IOCTL_OPERATIONS
++			if ((n->key.specified & AVTAB_OP) && n->datum.u.ops) {
++				shrink_size += sizeof(u8) + sizeof(u32) *
++					ARRAY_SIZE(n->datum.u.ops->op.perms);
++			}
++			#else
+ 			if ((n->key.specified & AVTAB_XPERMS) && n->datum.u.xperms) {
+ 				shrink_size += sizeof(u8) + sizeof(u8) + sizeof(u32) * ARRAY_SIZE(n->datum.u.xperms->perms.p);
+ 			}
++			#endif
+ 			n->next = NULL;
+ 			avtab_set_slot(&removed, 0, n);
+ 			removed.nel = 1;
+@@ -395,9 +451,31 @@ static void add_xperm_rule_raw(struct policydb *db, struct type_datum *src, stru
+ 
+ 		struct avtab_datum *datum;
+ 		struct avtab_node *node;
+-		struct avtab_extended_perms xperms;
++		struct ksu_avtab_extended_perms xperms;
+ 
+ 		memset(&xperms, 0, sizeof(xperms));
++#ifdef KSU_SELINUX_LEGACY_IOCTL_OPERATIONS
++		if (ioctl_driver(low) != ioctl_driver(high)) {
++			key.specified = effect << 4;
++			xperms.type = 0;
++		} else {
++			key.specified = effect;
++			xperms.type = ioctl_driver(low);
++		}
++		{
++			int i;
++			int first = key.specified & AVTAB_OPTYPE ?
++				ioctl_driver(low) : ioctl_func(low);
++			int last = key.specified & AVTAB_OPTYPE ?
++				ioctl_driver(high) : ioctl_func(high);
++			for (i = first; i <= last; ++i) {
++				if (invert)
++					xperm_clear(i, xperms.op.perms);
++				else
++					xperm_set(i, xperms.op.perms);
++			}
++		}
++#else
+ 		if (ioctl_driver(low) != ioctl_driver(high)) {
+ 			xperms.specified = AVTAB_XPERMS_IOCTLDRIVER;
+ 			xperms.driver = 0;
+@@ -421,6 +499,7 @@ static void add_xperm_rule_raw(struct policydb *db, struct type_datum *src, stru
+ 					xperm_set(i, xperms.perms.p);
+ 			}
+ 		}
++#endif
+ 
+ 		node = get_avtab_node(db, &key, &xperms);
+ 		if (!node) {
+@@ -429,6 +508,12 @@ static void add_xperm_rule_raw(struct policydb *db, struct type_datum *src, stru
+ 		}
+ 		datum = &node->datum;
+ 
++		#ifdef KSU_SELINUX_LEGACY_IOCTL_OPERATIONS
++		if (datum->u.ops == NULL) {
++			pr_err("alloc ioctl operations failed\n");
++			return;
++		}
++		#else
+ 		if (datum->u.xperms == NULL) {
+ 			datum->u.xperms = (struct avtab_extended_perms *)(kzalloc(sizeof(xperms), GFP_ATOMIC));
+ 			if (!datum->u.xperms) {
+@@ -437,6 +522,7 @@ static void add_xperm_rule_raw(struct policydb *db, struct type_datum *src, stru
+ 			}
+ 			memcpy(datum->u.xperms, &xperms, sizeof(xperms));
+ 		}
++		#endif
+ 	}
+ }
+ 

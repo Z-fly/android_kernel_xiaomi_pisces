@@ -396,10 +396,6 @@ SYSCALL_DEFINE2(stat64, const char __user *, filename,
 	if (!error)
 		error = cp_new_stat64(&stat, statbuf);
 
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)
-	ksu_handle_fstat64_ret(&fd, &statbuf);
-#endif
-
 	return error;
 }
 
@@ -422,6 +418,10 @@ SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
 
 	if (!error)
 		error = cp_new_stat64(&stat, statbuf);
+
+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)
+	ksu_handle_fstat64_ret(&fd, &statbuf);
+#endif
 
 	return error;
 }
