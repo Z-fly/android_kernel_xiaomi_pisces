@@ -1,7 +1,12 @@
-name: Build Pisces kernel
+name: Build Pisces KernelSU kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      kernelsu_ref:
+        description: Optional KernelSU branch, tag, or commit; blank tracks upstream master
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -13,8 +18,7 @@ env:
   DEFCONFIG: tegra11_pisces_user_defconfig
   TOOLCHAIN_ARCHIVE_URL: https://github.com/Deep-sea-lab/kernel_cancro_kernelsu/releases/download/gcc4.9.4/gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabi.tar.xz
   TOOLCHAIN_ARCHIVE_SHA256: 232302236c90ec136a42d44bc387d2e1199f5df010b77e97ee590216d2b5b181
-  ANYKERNEL3_REPOSITORY: https://github.com/osm0sis/AnyKernel3.git
-  ANYKERNEL3_REF: af770f7b16cf8f8eb7c68614b2a693b3b361c90c
+  KERNELSU_REPOSITORY: https://github.com/backslashxx/KernelSU.git
 
 jobs:
   build:
@@ -36,9 +40,8 @@ jobs:
             curl \
             flex \
             git \
-            unzip \
-            xz-utils \
-            zip
+            python3 \
+            xz-utils
 
       - name: Download Linaro GCC 4.9.4
         run: |
@@ -57,6 +60,31 @@ jobs:
           "${TOOLCHAIN_PREFIX}gcc" --version
           echo "TOOLCHAIN_PREFIX=$TOOLCHAIN_PREFIX" >> "$GITHUB_ENV"
 
+      - name: Prepare KernelSU dynamically
+        env:
+          KERNELSU_REF: ${{ inputs.kernelsu_ref }}
+        run: |
+          git init -q KernelSU
+          git -C KernelSU remote add origin "$KERNELSU_REPOSITORY"
+          if [ -n "$KERNELSU_REF" ]; then
+            git -C KernelSU fetch -q --force --depth=1 origin "$KERNELSU_REF"
+          else
+            git -C KernelSU fetch -q --force --depth=1 origin master
+          fi
+          git -C KernelSU -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+
+          test -f KernelSU/kernel/Kconfig
+          test -f KernelSU/kernel/Makefile
+          test ! -e drivers/kernelsu
+          ln -s ../KernelSU/kernel drivers/kernelsu
+          sed -i '/^endmenu$/i source "drivers/kernelsu/Kconfig"\n' drivers/Kconfig
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+
+          test "$(grep -Fxc 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig)" -eq 1
+          test "$(grep -Fxc 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile)" -eq 1
+          test "$(readlink drivers/kernelsu)" = "../KernelSU/kernel"
+          git -C KernelSU rev-parse HEAD
+
       - name: Configure kernel
         run: |
           mkdir -p "$OUT_DIR"
@@ -67,6 +95,15 @@ jobs:
             CROSS_COMPILE="$TOOLCHAIN_PREFIX" \
             HOSTCFLAGS="-fcommon" \
             "$DEFCONFIG"
+          make \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            SUBARCH="$SUBARCH" \
+            CROSS_COMPILE="$TOOLCHAIN_PREFIX" \
+            HOSTCFLAGS="-fcommon" \
+            silentoldconfig
+          grep -qx 'CONFIG_KSU=y' "$OUT_DIR/.config"
+          grep -qx 'CONFIG_KSU_LSM_SECURITY_HOOKS=y' "$OUT_DIR/.config"
           make -s \
             O="$OUT_DIR" \
             ARCH="$ARCH" \
@@ -84,11 +121,10 @@ jobs:
             CROSS_COMPILE="$TOOLCHAIN_PREFIX" \
             HOSTCFLAGS="-fcommon"
 
-      - name: Package AnyKernel3 flashable zip
+      - name: Replace zImage in boot image
         run: |
           IMAGE_PATH="$OUT_DIR/arch/arm/boot/zImage"
           test -s "$IMAGE_PATH"
-
           KERNEL_RELEASE="$(make -s \
             O="$OUT_DIR" \
             ARCH="$ARCH" \
@@ -96,64 +132,66 @@ jobs:
             CROSS_COMPILE="$TOOLCHAIN_PREFIX" \
             HOSTCFLAGS="-fcommon" \
             kernelrelease)"
-          ZIP_NAME="AnyKernel3-pisces-${KERNEL_RELEASE}-${GITHUB_RUN_NUMBER}.zip"
-          ZIP_PATH="$GITHUB_WORKSPACE/$ZIP_NAME"
-          ANYKERNEL_DIR="$RUNNER_TEMP/AnyKernel3"
+          BOOT_IMAGE="artifacts/boot-pisces-kernelsu-${KERNEL_RELEASE}-${GITHUB_RUN_NUMBER}.img"
 
-          git init -q "$ANYKERNEL_DIR"
-          git -C "$ANYKERNEL_DIR" remote add origin "$ANYKERNEL3_REPOSITORY"
-          git -C "$ANYKERNEL_DIR" fetch -q --depth=1 origin "$ANYKERNEL3_REF"
-          git -C "$ANYKERNEL_DIR" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
-          test "$(git -C "$ANYKERNEL_DIR" rev-parse HEAD)" = "$ANYKERNEL3_REF"
+          python3 - ".github/boot.img" "$IMAGE_PATH" "$BOOT_IMAGE" <<'PY'
+          from pathlib import Path
+          import hashlib
+          import struct
+          import sys
 
-          cp "$IMAGE_PATH" "$ANYKERNEL_DIR/zImage"
-          cat > "$ANYKERNEL_DIR/anykernel.sh" <<'EOF'
-          ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
+          模板路径, 内核路径, 输出路径 = map(Path, sys.argv[1:])
+          启动镜像 = 模板路径.read_bytes()
+          内核镜像 = 内核路径.read_bytes()
 
-          properties() { '
-          kernel.string=Xiaomi Mi 3 TD Pisces Kernel
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=pisces
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; }
+          if 启动镜像[:8] != b"ANDROID!":
+              raise SystemExit(f"无效的 Android boot 镜像: {模板路径}")
+          if len(内核镜像) < 0x28 or struct.unpack_from("<I", 内核镜像, 0x24)[0] != 0x016F2818:
+              raise SystemExit(f"无效的 ARM zImage: {内核路径}")
 
-          BLOCK=boot;
-          IS_SLOT_DEVICE=0;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=0;
-
-          . tools/ak3-core.sh;
-
-          split_boot;
-          flash_boot;
-          EOF
-          chmod 755 "$ANYKERNEL_DIR/anykernel.sh"
-
-          (
-            cd "$ANYKERNEL_DIR"
-            zip -r9 "$ZIP_PATH" * -x '.git*' 'README.md' '*placeholder'
+          读取整数 = lambda 偏移: struct.unpack_from("<I", 启动镜像, 偏移)[0]
+          旧内核大小, 内存盘大小, 第二阶段大小, 页面大小, 设备树大小 = map(
+              读取整数, (8, 16, 24, 36, 40)
           )
+          if 页面大小 < 608 or 页面大小 & (页面大小 - 1):
+              raise SystemExit(f"无效的页面大小: {页面大小}")
+          对齐大小 = lambda 大小: (大小 + 页面大小 - 1) // 页面大小 * 页面大小
 
-          test -s "$ZIP_PATH"
-          unzip -t "$ZIP_PATH"
-          unzip -Z1 "$ZIP_PATH" | grep -qx 'zImage'
-          unzip -Z1 "$ZIP_PATH" | grep -qx 'anykernel.sh'
-          unzip -Z1 "$ZIP_PATH" | grep -qx 'META-INF/com/google/android/update-binary'
-          unzip -Z1 "$ZIP_PATH" | grep -qx 'LICENSE'
-          sha256sum "$ZIP_PATH"
-          echo "ANYKERNEL_ZIP=$ZIP_PATH" >> "$GITHUB_ENV"
+          偏移 = 页面大小 + 对齐大小(旧内核大小)
+          内存盘 = 启动镜像[偏移:偏移 + 内存盘大小]
+          偏移 += 对齐大小(内存盘大小)
+          第二阶段 = 启动镜像[偏移:偏移 + 第二阶段大小]
+          偏移 += 对齐大小(第二阶段大小)
+          设备树 = 启动镜像[偏移:偏移 + 设备树大小]
+          if 偏移 + 对齐大小(设备树大小) != len(启动镜像):
+              raise SystemExit("不支持的旧版 boot 镜像布局")
 
-      - name: Upload AnyKernel3 flashable zip
+          文件头 = bytearray(启动镜像[:页面大小])
+          struct.pack_into("<I", 文件头, 8, len(内核镜像))
+          摘要 = hashlib.sha1()
+          for 数据段 in (内核镜像, 内存盘, 第二阶段, 设备树):
+              摘要.update(数据段)
+              摘要.update(struct.pack("<I", len(数据段)))
+          文件头[576:608] = 摘要.digest() + bytes(12)
+
+          补齐 = lambda 数据段: 数据段 + bytes(对齐大小(len(数据段)) - len(数据段))
+          新启动镜像 = bytes(文件头) + b"".join(map(补齐, (内核镜像, 内存盘, 第二阶段, 设备树)))
+          输出路径.parent.mkdir(parents=True, exist_ok=True)
+          输出路径.write_bytes(新启动镜像)
+          print(f"已生成 {输出路径} ({len(新启动镜像)} bytes)")
+          print(f"SHA-256: {hashlib.sha256(新启动镜像).hexdigest()}")
+          PY
+
+          test -s "$BOOT_IMAGE"
+          git -C KernelSU rev-parse HEAD > artifacts/KernelSU-commit.txt
+          echo "BOOT_IMAGE=$BOOT_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Upload repacked boot image
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ env.ANYKERNEL_ZIP }}
-          archive: false
+          name: pisces-kernelsu-${{ github.run_number }}
+          path: |
+            ${{ env.BOOT_IMAGE }}
+            artifacts/KernelSU-commit.txt
           if-no-files-found: error
           retention-days: 30
