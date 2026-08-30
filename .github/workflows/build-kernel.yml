@@ -59,9 +59,9 @@ jobs:
           else
             git -C KernelSU fetch -q --force --depth=1 origin master
           fi
-          #git -C KernelSU -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          git -C KernelSU -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
           #git -C KernelSU apply --check "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4.patch"
-          git -C KernelSU apply "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4.patch"
+          #git -C KernelSU apply "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4.patch"
           test -f KernelSU/kernel/Kconfig
           test -f KernelSU/kernel/Makefile
           test ! -e drivers/kernelsu
