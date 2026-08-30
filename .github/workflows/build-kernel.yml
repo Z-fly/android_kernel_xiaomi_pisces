@@ -59,8 +59,8 @@ jobs:
           else
             git -C KernelSU fetch -q --force --depth=1 origin master
           fi
-          git -C KernelSU -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
-          git -C KernelSU apply --check "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4.patch"
+          #git -C KernelSU -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          #git -C KernelSU apply --check "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4.patch"
           git -C KernelSU apply "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4.patch"
           test -f KernelSU/kernel/Kconfig
           test -f KernelSU/kernel/Makefile
@@ -132,9 +132,9 @@ jobs:
           启动镜像 = 模板路径.read_bytes()
           内核镜像 = 内核路径.read_bytes()
           if 启动镜像[:8] != b"ANDROID!":
-              raise SystemExit(f"无效的 Android boot 镜像: {模板路径}")
+              raise SystemExit(f"无效的Android boot镜像: {模板路径}")
           if len(内核镜像) < 0x28 or unpack_from("<I", 内核镜像, 0x24)[0] != 0x016F2818:
-              raise SystemExit(f"无效的 ARM zImage: {内核路径}")
+              raise SystemExit(f"无效的ARM zImage: {内核路径}")
           读取整数 = lambda 偏移: unpack_from("<I", 启动镜像, 偏移)[0]
           旧内核大小, 内存盘大小, 第二阶段大小, 页面大小, 设备树大小 = map(
               读取整数, (8, 16, 24, 36, 40)
@@ -149,7 +149,7 @@ jobs:
           偏移 += 对齐大小(第二阶段大小)
           设备树 = 启动镜像[偏移:偏移 + 设备树大小]
           if 偏移 + 对齐大小(设备树大小) != len(启动镜像):
-              raise SystemExit("不支持的旧版 boot 镜像布局")
+              raise SystemExit("不支持的旧版boot镜像布局")
           文件头 = bytearray(启动镜像[:页面大小])
           pack_into("<I", 文件头, 8, len(内核镜像))
           摘要 = sha1()
