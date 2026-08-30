@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       kernelsu_ref:
-        description: 可选的KernelSU分支、标签或提交；留空则跟踪上游master分支
+        description: 可选的KernelSU分支、标签或提交；留空使用已验证的固定提交
         required: false
         default: ""
 
@@ -19,6 +19,7 @@ env:
   TOOLCHAIN_ARCHIVE_URL: https://github.com/Deep-sea-lab/kernel_cancro_kernelsu/releases/download/gcc4.9.4/gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabi.tar.xz
   TOOLCHAIN_ARCHIVE_SHA256: 232302236c90ec136a42d44bc387d2e1199f5df010b77e97ee590216d2b5b181
   KERNELSU_REPOSITORY: https://github.com/backslashxx/KernelSU.git
+  KERNELSU_DEFAULT_REF: 2ccdac3db1eacab1768cca67214a246b3b46cbe7
 
 jobs:
   build:
@@ -48,7 +49,7 @@ jobs:
           "${TOOLCHAIN_PREFIX}gcc" --version
           echo "TOOLCHAIN_PREFIX=$TOOLCHAIN_PREFIX" >> "$GITHUB_ENV"
 
-      - name: Prepare KernelSU dynamically
+      - name: Prepare KernelSU at a compatible revision
         env:
           KERNELSU_REF: ${{ inputs.kernelsu_ref }}
         run: |
@@ -57,11 +58,12 @@ jobs:
           if [ -n "$KERNELSU_REF" ]; then
             git -C KernelSU fetch -q --force --depth=1 origin "$KERNELSU_REF"
           else
-            git -C KernelSU fetch -q --force --depth=1 origin master
+            git -C KernelSU fetch -q --force --depth=1 origin "$KERNELSU_DEFAULT_REF"
           fi
           git -C KernelSU -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
-          #git -C KernelSU apply --check "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4.patch"
-          #git -C KernelSU apply "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4.patch"
+          # Linux 3.4's SELinux policy API lacks KernelSU's modern xperm structures.
+          git -C KernelSU apply --check "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4-minimal.patch"
+          git -C KernelSU apply "$GITHUB_WORKSPACE/.github/patches/kernelsu-pisces-3.4-minimal.patch"
           test -f KernelSU/kernel/Kconfig
           test -f KernelSU/kernel/Makefile
           test ! -e drivers/kernelsu

@@ -1,0 +1,193 @@
+diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
+index 12a7a170..03fec11b 100644
+--- a/kernel/selinux/rules.c
++++ b/kernel/selinux/rules.c
+@@ -71,12 +71,14 @@ static int apply_kernelsu_rules_fn(void *ptr)
+ 	ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
+ 
+ 	// allow us do any ioctl
++#ifndef KSU_COMPAT_NO_XPERMS
+ 	if (db->policyvers >= POLICYDB_VERSION_XPERMS_IOCTL) {
+ 		ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "blk_file", ALL);
+ 		ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "fifo_file", ALL);
+ 		ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "chr_file", ALL);
+ 		ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "file", ALL);
+ 	}
++#endif
+ 
+ 	// our ksud triggered by init
+ 	ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
+diff --git a/kernel/selinux/sepolicy.c b/kernel/selinux/sepolicy.c
+index ddad2aa6..59fbe1f8 100644
+--- a/kernel/selinux/sepolicy.c
++++ b/kernel/selinux/sepolicy.c
+@@ -1,5 +1,9 @@
+ #define KSU_SUPPORT_ADD_TYPE
+ 
++#if defined(AVTAB_OP) && !defined(AVTAB_XPERMS)
++#define KSU_COMPAT_NO_XPERMS
++#endif
++
+ /*
+  * Adapt to Huawei HISI kernel without affecting other kernels ,
+  * Huawei Hisi Kernel EBITMAP Enable or Disable Flag ,
+@@ -18,8 +22,14 @@
+ // Declaration
+ //////////////////////////////////////////////////////
+ 
++#ifdef KSU_COMPAT_NO_XPERMS
++typedef void ksu_avtab_extended_perms;
++#else
++typedef struct avtab_extended_perms ksu_avtab_extended_perms;
++#endif
++
+ static struct avtab_node *get_avtab_node(struct policydb *db, struct avtab_key *key,
+-                                         struct avtab_extended_perms *xperms);
++					 ksu_avtab_extended_perms *xperms);
+ 
+ static bool is_redundant_avtab_node(struct avtab_node *node);
+ 
+@@ -31,10 +41,12 @@ static bool add_rule(struct policydb *db, const char *s, const char *t, const ch
+ static bool add_rule_raw(struct policydb *db, struct type_datum *src, struct type_datum *tgt, struct class_datum *cls,
+ 				struct perm_datum *perm, int effect, bool invert);
+ 
++#ifndef KSU_COMPAT_NO_XPERMS
+ static void add_xperm_rule_raw(struct policydb *db, struct type_datum *src, struct type_datum *tgt,
+ 				struct class_datum *cls, uint16_t low, uint16_t high, int effect, bool invert);
+ static bool add_xperm_rule(struct policydb *db, const char *s, const char *t, const char *c, const char *range,
+ 				int effect, bool invert);
++#endif
+ 
+ static bool add_type_rule(struct policydb *db, const char *s, const char *t, const char *c, const char *d, int effect);
+ 
+@@ -83,10 +95,11 @@ static bool add_typeattribute(struct policydb *db, const char *type, const char
+ 
+ static struct avtab_node *get_avtab_node(struct policydb *db,
+ 					 struct avtab_key *key,
+-					 struct avtab_extended_perms *xperms)
++					 ksu_avtab_extended_perms *xperms)
+ {
+ 	struct avtab_node *node;
+ 
++#ifndef KSU_COMPAT_NO_XPERMS
+ 	/* AVTAB_XPERMS entries are not necessarily unique */
+ 	if (key->specified & AVTAB_XPERMS) {
+ 		bool match = false;
+@@ -105,6 +118,9 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
+ 	} else {
+ 		node = avtab_search_node(&db->te_avtab, key);
+ 	}
++#else
++	node = avtab_search_node(&db->te_avtab, key);
++#endif
+ 
+ 	if (!node) {
+ 		struct avtab_datum avdatum = {};
+@@ -112,12 +128,16 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
+      * AUDITDENY, aka DONTAUDIT, are &= assigned, versus |= for
+      * others. Initialize the data accordingly.
+      */
++#ifndef KSU_COMPAT_NO_XPERMS
+ 		if (key->specified & AVTAB_XPERMS) {
+ 			avdatum.u.xperms = xperms;
+ 		} else {
++#endif
+ 			avdatum.u.data =
+ 				key->specified == AVTAB_AUDITDENY ? ~0U : 0U;
++#ifndef KSU_COMPAT_NO_XPERMS
+ 		}
++#endif
+ 		/* this is used to get the node - insertion is actually unique */
+ 		node = avtab_insert_nonunique(&db->te_avtab, key, &avdatum);
+ 		if (!node)
+@@ -125,12 +145,14 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
+ 
+ 		int grow_size = sizeof(struct avtab_key);
+ 		grow_size += sizeof(struct avtab_datum);
++#ifndef KSU_COMPAT_NO_XPERMS
+ 		if (key->specified & AVTAB_XPERMS) {
+ 			grow_size += sizeof(u8);
+ 			grow_size += sizeof(u8);
+ 			grow_size += sizeof(u32) *
+ 				     ARRAY_SIZE(avdatum.u.xperms->perms.p);
+ 		}
++#endif
+ 		db->len += grow_size;
+ 	}
+ 
+@@ -139,8 +161,10 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
+ 
+ static bool is_redundant_avtab_node(struct avtab_node *node)
+ {
++#ifndef KSU_COMPAT_NO_XPERMS
+ 	if (node->key.specified & AVTAB_XPERMS)
+ 		return node->datum.u.xperms == NULL;
++#endif
+ 	if (!(node->key.specified & AVTAB_AV))
+ 		return false;
+ 	if (node->key.specified & AVTAB_AUDITDENY)
+@@ -205,9 +229,11 @@ static bool remove_avtab_node(struct policydb *db, struct avtab_node *node)
+ 			if (db->te_avtab.nel > 0)
+ 				db->te_avtab.nel--;
+ 
++#ifndef KSU_COMPAT_NO_XPERMS
+ 			if ((n->key.specified & AVTAB_XPERMS) && n->datum.u.xperms) {
+ 				shrink_size += sizeof(u8) + sizeof(u8) + sizeof(u32) * ARRAY_SIZE(n->datum.u.xperms->perms.p);
+ 			}
++#endif
+ 			n->next = NULL;
+ 			avtab_set_slot(&removed, 0, n);
+ 			removed.nel = 1;
+@@ -352,6 +378,8 @@ static bool add_rule_raw(struct policydb *db, struct type_datum *src, struct typ
+ 	return success;
+ }
+ 
++#ifndef KSU_COMPAT_NO_XPERMS
++
+ #define ioctl_driver(x) (x >> 8 & 0xFF)
+ #define ioctl_func(x) (x & 0xFF)
+ 
+@@ -488,6 +516,8 @@ static bool add_xperm_rule(struct policydb *db, const char *s, const char *t, co
+ 	return true;
+ }
+ 
++#endif /* !KSU_COMPAT_NO_XPERMS */
++
+ static bool add_type_rule(struct policydb *db, const char *s, const char *t, const char *c, const char *d, int effect)
+ {
+ 	struct type_datum *src, *tgt, *def;
+@@ -1171,22 +1201,34 @@ bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt,
+ bool ksu_allowxperm(struct policydb *db, const char *src, const char *tgt,
+ 		    const char *cls, const char *range)
+ {
++#ifdef KSU_COMPAT_NO_XPERMS
++	return false;
++#else
+ 	return add_xperm_rule(db, src, tgt, cls, range, AVTAB_XPERMS_ALLOWED,
+ 			      false);
++#endif
+ }
+ 
+ bool ksu_auditallowxperm(struct policydb *db, const char *src, const char *tgt,
+ 			 const char *cls, const char *range)
+ {
++#ifdef KSU_COMPAT_NO_XPERMS
++	return false;
++#else
+ 	return add_xperm_rule(db, src, tgt, cls, range, AVTAB_XPERMS_AUDITALLOW,
+ 			      false);
++#endif
+ }
+ 
+ bool ksu_dontauditxperm(struct policydb *db, const char *src, const char *tgt,
+ 			const char *cls, const char *range)
+ {
++#ifdef KSU_COMPAT_NO_XPERMS
++	return false;
++#else
+ 	return add_xperm_rule(db, src, tgt, cls, range, AVTAB_XPERMS_DONTAUDIT,
+ 			      false);
++#endif
+ }
+ 
+ // Type rules
