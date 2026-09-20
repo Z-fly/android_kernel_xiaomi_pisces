@@ -1,8 +1,61 @@
+diff --git a/kernel/Makefile b/kernel/Makefile
+index d3a3f45..bbb53a0 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -116,6 +116,11 @@ CFLAGS_ksu.o += $(call cc-option, -std=gnu17)
+ CFLAGS_ksu.o += $(call cc-option, -std=gnu23)
+ CFLAGS_ksu.o += $(call cc-option, -std=gnu2y)
+ 
++# Linux 3.4 headers use GNU89 extern inline semantics (e.g. ARM ftrace).
++ifeq ($(VERSION).$(PATCHLEVEL),3.4)
++CFLAGS_ksu.o += $(call cc-option, -fgnu89-inline)
++endif
++
+ #ifeq ($(shell $(CC) -v 2>&1 | grep -q 'clang'; echo $$?),0)
+ # $(info -- KernelSU/CC: clang!)
+ #endif
+diff --git a/kernel/external/linux_overflow.h b/kernel/external/linux_overflow.h
+index fd465c8..a397822 100644
+--- a/kernel/external/linux_overflow.h
++++ b/kernel/external/linux_overflow.h
+@@ -6,6 +6,12 @@
+ #ifndef __LINUX_OVERFLOW_H
+ #define __LINUX_OVERFLOW_H
+ 
++#include <linux/types.h>
++
++#ifndef SIZE_MAX
++#define SIZE_MAX ((size_t)~0UL)
++#endif
++
+ /*
+  * In the fallback code below, we need to compute the minimum and
+  * maximum values representable in a given type. These macros may also
+diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
+index 4e12aab..11cbbcf 100644
+--- a/kernel/policy/app_profile.c
++++ b/kernel/policy/app_profile.c
+@@ -1,3 +1,5 @@
++#include <linux/prctl.h>
++
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION (6, 7, 0)
+ static struct group_info root_groups = { .usage = REFCOUNT_INIT(2) };
+ #else
+@@ -143,7 +145,9 @@ static int escape_to_root(bool is_forced)
+ 	memcpy(&cred->cap_bset, &profile->capabilities.effective, sizeof(cred->cap_bset));
+ 	if (profile->uid != 0) {
+ 		memcpy(&cred->cap_inheritable, &profile->capabilities.effective, sizeof(cred->cap_inheritable));
++#ifdef PR_CAP_AMBIENT
+ 		memcpy(&cred->cap_ambient, &profile->capabilities.effective, sizeof(cred->cap_ambient));
++#endif
+ 	}
+ 
+ 	setup_groups(profile, cred);
 diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
-index 12a7a170..03fec11b 100644
+index b510ba2..c611fb1 100644
 --- a/kernel/selinux/rules.c
 +++ b/kernel/selinux/rules.c
-@@ -71,12 +71,14 @@ static int apply_kernelsu_rules_fn(void *ptr)
+@@ -83,12 +83,14 @@ static int apply_kernelsu_rules_fn(void *ptr)
  	ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
  
  	// allow us do any ioctl
@@ -18,7 +71,7 @@ index 12a7a170..03fec11b 100644
  	// our ksud triggered by init
  	ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
 diff --git a/kernel/selinux/sepolicy.c b/kernel/selinux/sepolicy.c
-index ddad2aa6..59fbe1f8 100644
+index 11a8897..d945ce1 100644
 --- a/kernel/selinux/sepolicy.c
 +++ b/kernel/selinux/sepolicy.c
 @@ -1,5 +1,9 @@
